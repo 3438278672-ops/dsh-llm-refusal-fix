@@ -24,7 +24,8 @@
     }
   },
   "scripts": {
-    "test": "node tests/run.mjs"
+    "test": "node tests/run.mjs",
+    "test:e2e": "node tests/e2e.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cosmokit": ">=1.9.0 <2.0.0",

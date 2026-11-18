@@ -38,7 +38,7 @@ npm test
 
 装好 bundle 后在任意会话里调用该工具，输出 9 条 fixture 的摘要（与离线用例同一批契约，作为「这个进程里补丁真的在跑」的冒烟测试）：
 
-**结果（2026-11-18，0.1.0 时期）**：`7/7 PASS`；0.2.0 改成 9 条，装好后应报 `9/9 PASS`。
+**结果（2026-11-18，0.2.0 装机后）**：`9/9 PASS`（0.1.0 时期是 7/7）。
 
 ## 三、真机接管核验
 
@@ -70,7 +70,47 @@ npm test
 - 关掉插件后恢复正常：内置适配器把 refusal 判成 `MALFORMED_RESPONSE`（该码在可重试列表），agent 自动重试 5 次，通常某次就成功。
 - 结论：refusal 必须保持「可重试」，且适配器不能合成任何回答文本（0.2.0 已按此实现）。
 
-## 六、未覆盖 / 待观察
+## 六、端到端与真机上游实测（0.2.0，2026-11-18）
 
-- 0.2.0 的**真实拒答**还没在线上自然复现。预期：上游拒答时 agent 自动重试；重试成功则用户无感；重试耗尽才向调用方报 `EMPTY_RESPONSE`。QQ 桥是否会把该错误原文贴进群，属于桥接侧的行为（可在桥接里把 `EMPTY_RESPONSE`/`refused to answer under its content safety review` 翻成人话或静默）。
-- 上游 0.2.2-rc.4 把错误码改成了 `CONTENT_REFUSED` 但仍未修可恢复性；**上游修好 `CONTINUABLE_FAILURES`/终止原因映射之后，本包即可卸载**。
+### 6.1 mock 端点驱动真实适配器：6/6
+
+`npm run test:e2e`（`tests/e2e.mjs`）：本地 `http.createServer` 扮演 Messages 端点，通过真实 HTTP 驱动**未改动的修补版 `DeepSeekAdapter` 类**（不是只喂 fixture）：第 1 次回 refusal SSE，第 2 次回正常 SSE。
+
+| 断言 | 结果 |
+| --- | --- |
+| 第 1 次调用抛 `EMPTY_RESPONSE` | ✅ |
+| 错误说明含 `refused to answer under its content safety review` | ✅ |
+| 第 1 次调用不产生任何 text-delta | ✅ |
+| 第 2 次（重试）正常结束，`finish.kind = 'stop'` | ✅ |
+| 第 2 次拿到上游正文 `ok` | ✅ |
+
+### 6.2 真实抓包重放：4/4
+
+`node tests/e2e-replay.mjs`：把 2026-11-17 抓到的真实拒答流（原样 SSE，`stop_reason: refusal`，28 个事件）解析后喂给修补后 `translate()`：
+
+| 断言 | 结果 |
+| --- | --- |
+| 真实拒答 → 可重试 `EMPTY_RESPONSE` | ✅ |
+| 错误 message 指明安全审查 | ✅ |
+| 不合成任何 assistant 文本 | ✅ |
+| 拒答不产生 finish chunk | ✅ |
+
+### 6.3 真实上游（`api.deepseek.com`）：逐次结果
+
+用本机账号 token 直连真实 Messages 端点（`D:\TAP\_live02.mjs`，token 只读不打印）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 普通请求（"Reply with the single word: OK"） | `finish=stop`，拿到正文，无合成文本 |
+| 拒答易发 payload（0.1.0 时期 12 连拒的同一段 wake prompt）第 1 次 | `stop` |
+| 第 2 次 | `EMPTY_RESPONSE`（安全审查说明） |
+| 第 3 次 | `EMPTY_RESPONSE` |
+| 第 4 次 | `stop` |
+
+→ 真实上游的采样式拒答被正确标成**可重试**，重试后拿到正常回答；这正是 agent 循环需要的语义（`EMPTY_RESPONSE` 在重试列表里）。
+
+## 七、未覆盖 / 待观察
+
+- agent 循环自然重试整条链路还没在线上自然撞到（拒答是采样的）。预期：重试成功则用户无感；5 次重试全拒才向调用方报 `EMPTY_RESPONSE`。
+- 重试耗尽时 QQ 桥会把错误原文贴进群（`bridge.js:12239-12245` 的行为）；桥接侧是否把 `EMPTY_RESPONSE`/`refused to answer under its content safety review` 翻成人话或静默，仍是待定项。
+- 上游 0.2.2-rc.4 把错误码改成 `CONTENT_REFUSED`，但仍未修可恢复性；上游修好 `CONTINUABLE_FAILURES`/终止原因映射之后，本包即可卸载。
