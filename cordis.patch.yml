@@ -9,7 +9,9 @@
 #      end_turn / stop_sequence / pause_turn / cancelled -> stop
 #      tool_use -> tool-calls
 #      max_tokens / model_context_window_exceeded -> max-tokens
-#      refusal -> normal stop + one readable notice (not a protocol error)
+#      refusal -> retryable EMPTY_RESPONSE (a well-formed turn with no
+#                 answerable content; the agent loop retries it and the
+#                 adapter never synthesizes answer text)
 #      anything unknown still MALFORMED_RESPONSE (no hiding real wire damage)
 - id: llm-deepseek-account
   disabled: true

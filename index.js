@@ -11,11 +11,15 @@
  *
  * 本 bundle 的做法（根治，不是特判字符串）：
  * - lib/adapter.js 是随 dsh 发布的 adapter 的能力等价副本，只改「终止原因 ->
- *   Harness 终止状态」这一层契约：refusal 映射为正常 stop，并把说明合成成一条
- *   text block（避免 EMPTY_RESPONSE，用户能看到为什么没回答）；pause_turn /
- *   cancelled / model_context_window_exceeded 也各归其位；未知值仍然报错。
+ *   Harness 终止状态」这一层契约：
+ *     refusal                  -> 合法但无内容的回合，报可重试的 EMPTY_RESPONSE；
+ *     pause_turn / cancelled   -> 正常结束；
+ *     model_context_window_exceeded -> max-tokens；
+ *     未知值仍然 malformed。
+ *   关键点：refusal 不合成任何回答文本（否则它会作为模型消息进入会话历史，把
+ *   下一轮也带偏）；重试交给 agent loop 现成的 EMPTY_RESPONSE 策略。
  * - lib/account.js 是随 dsh 发布的 account provider 的副本，只改两处：
- *   适配器从 vendored 副本导入、settingsNs 固定为 llm-deepseek-account。
+ *   适配器从 vendored 副本导入、providerId / settingsNs 可配置。
  * - cordis.patch.yml 禁用内置行并插入本 bundle 的行。
  *
  * 另外注册一个 `llm_refusal_fix_selftest` 工具：对 translate() 跑一组终止原因
@@ -73,26 +77,18 @@ function blocksOf(result) {
 
 const CASES = [
   {
-    name: 'refusal-with-no-content-is-a-normal-stop',
+    name: 'refusal-with-no-content-is-retryable-empty-response',
     events: [
       START,
       { type: 'message_delta', delta: { stop_reason: 'refusal', stop_sequence: null }, usage: { output_tokens: 22 } },
       { type: 'message_stop' },
     ],
     check(result) {
-      const finish = finishOf(result)
-      const blocks = blocksOf(result)
-      return (
-        result.error === undefined &&
-        finish?.reason?.kind === 'stop' &&
-        blocks.length === 1 &&
-        blocks[0].type === 'text' &&
-        blocks[0].text.length > 0
-      )
+      return result.error?.code === 'EMPTY_RESPONSE' && blocksOf(result).length === 0
     },
   },
   {
-    name: 'refusal-carries-stop-details-explanation',
+    name: 'refusal-stop-details-are-carried-in-the-error',
     events: [
       START,
       {
@@ -103,12 +99,11 @@ const CASES = [
       { type: 'message_stop' },
     ],
     check(result) {
-      const blocks = blocksOf(result)
-      return result.error === undefined && blocks.length === 1 && blocks[0].text.includes('safety-review')
+      return result.error?.code === 'EMPTY_RESPONSE' && String(result.error?.message).includes('safety-review')
     },
   },
   {
-    name: 'refusal-after-thinking-keeps-order',
+    name: 'refusal-after-thinking-never-synthesizes-text',
     events: [
       START,
       ...thinkingBlock('pondering'),
@@ -117,13 +112,7 @@ const CASES = [
     ],
     check(result) {
       const blocks = blocksOf(result)
-      return (
-        result.error === undefined &&
-        blocks.length === 2 &&
-        blocks[0].type === 'reasoning' &&
-        blocks[1].type === 'text' &&
-        finishOf(result)?.reason?.kind === 'stop'
-      )
+      return result.error?.code === 'EMPTY_RESPONSE' && blocks.every((block) => block.type !== 'text')
     },
   },
   {
@@ -146,6 +135,13 @@ const CASES = [
     },
   },
   {
+    name: 'cancelled-is-terminal-not-malformed',
+    events: [START, ...textBlock('cancelled mid-stream'), { type: 'message_delta', delta: { stop_reason: 'cancelled' } }, { type: 'message_stop' }],
+    check(result) {
+      return result.error === undefined && finishOf(result)?.reason?.kind === 'stop'
+    },
+  },
+  {
     name: 'unknown-stop-reason-still-malformed',
     events: [START, { type: 'message_delta', delta: { stop_reason: 'banana' } }, { type: 'message_stop' }],
     check(result) {
@@ -157,6 +153,20 @@ const CASES = [
     events: [START, ...textBlock('hello'), { type: 'message_delta', delta: { stop_reason: 'end_turn' } }, { type: 'message_stop' }],
     check(result) {
       return result.error === undefined && finishOf(result)?.reason?.kind === 'stop'
+    },
+  },
+  {
+    name: 'tool-use-still-tool-calls',
+    events: [
+      START,
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'get_time', input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"tz":"UTC"}' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+      { type: 'message_stop' },
+    ],
+    check(result) {
+      return result.error === undefined && finishOf(result)?.reason?.kind === 'tool-calls'
     },
   },
 ]
@@ -184,7 +194,7 @@ async function runSelfTest() {
     cases: results,
     summary:
       failed.length === 0
-        ? `refusal-fix selftest: ${results.length}/${results.length} PASS — 终止原因契约已修正`
+        ? `refusal-fix selftest: ${results.length}/${results.length} PASS — 终止原因契约已修正（refusal → 可重试 EMPTY_RESPONSE，不合成回答文本）`
         : `refusal-fix selftest: ${results.length - failed.length}/${results.length} PASS，失败：${failed.map((f) => `${f.case}（${f.detail}）`).join('；')}`,
   }
 }
@@ -193,7 +203,7 @@ function registerSelfTest(ctx) {
   const definition = {
     name: 'llm_refusal_fix_selftest',
     description:
-      '自检 dsh-llm-refusal-fix 补丁是否生效：对 Messages 适配器的 translate() 跑一组终止原因 fixture（refusal / refusal+stop_details / refusal 跟在 thinking 后 / pause_turn / model_context_window_exceeded / 未知值 / end_turn），逐条报告 PASS/FAIL。只读，不发网络请求。',
+      '自检 dsh-llm-refusal-fix 补丁是否生效：对 Messages 适配器的 translate() 跑一组终止原因 fixture（refusal / refusal+stop_details / refusal 跟在 thinking 后 / pause_turn / model_context_window_exceeded / cancelled / 未知值 / end_turn / tool_use），逐条报告 PASS/FAIL。只读，不发网络请求。',
     parameters: { type: 'object', properties: {} },
     timeoutMs: 30000,
     output: OUTPUT_CONTRACT,

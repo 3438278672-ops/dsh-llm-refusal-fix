@@ -5,7 +5,10 @@
 // The contract under test:
 //   - every stop_reason the Messages protocol documents is a terminal turn
 //     state, never MALFORMED_RESPONSE;
-//   - refusal keeps the turn alive: one readable text block + {kind:'stop'};
+//   - a safety refusal is a well-formed turn with no answerable content, so it
+//     maps to the retryable EMPTY_RESPONSE code and the agent loop retries it;
+//   - the adapter never synthesizes answer text: a refusal must not become a
+//     model-authored message in the conversation history;
 //   - genuinely broken streams still fail as MALFORMED_RESPONSE.
 
 const START = { type: 'message_start', message: { usage: { input_tokens: 14631, output_tokens: 0 } } };
@@ -26,27 +29,29 @@ function thinkingBlock(text) {
 
 export const CASES = [
 	{
-		name: 'refusal-with-no-content-is-a-normal-stop',
+		name: 'refusal-with-no-content-is-retryable-empty-response',
 		events: [START, { type: 'message_delta', delta: { stop_reason: 'refusal', stop_sequence: null }, usage: { output_tokens: 22 } }, { type: 'message_stop' }],
 		check({ error, chunks }) {
-			const blocks = blocksOf(chunks);
-			return error === undefined && finishOf(chunks)?.reason?.kind === 'stop' && blocks.length === 1 && blocks[0].type === 'text' && blocks[0].text.length > 0;
+			return error?.code === 'EMPTY_RESPONSE' && blocksOf(chunks).length === 0;
 		},
 	},
 	{
-		name: 'refusal-carries-stop-details-explanation',
-		events: [START, { type: 'message_delta', delta: { stop_reason: 'refusal', stop_sequence: null, stop_details: { type: 'refusal', explanation: 'safety-review' } }, usage: { output_tokens: 8 } }, { type: 'message_stop' }],
-		check({ error, chunks }) {
-			const blocks = blocksOf(chunks);
-			return error === undefined && blocks.length === 1 && blocks[0].text.includes('safety-review');
+		name: 'refusal-stop-details-are-carried-in-the-error',
+		events: [
+			START,
+			{ type: 'message_delta', delta: { stop_reason: 'refusal', stop_sequence: null, stop_details: { type: 'refusal', explanation: 'safety-review' } }, usage: { output_tokens: 8 } },
+			{ type: 'message_stop' },
+		],
+		check({ error }) {
+			return error?.code === 'EMPTY_RESPONSE' && String(error?.message).includes('safety-review');
 		},
 	},
 	{
-		name: 'refusal-after-thinking-keeps-order',
+		name: 'refusal-after-thinking-never-synthesizes-text',
 		events: [START, ...thinkingBlock('pondering'), { type: 'message_delta', delta: { stop_reason: 'refusal' }, usage: { output_tokens: 22 } }, { type: 'message_stop' }],
 		check({ error, chunks }) {
 			const blocks = blocksOf(chunks);
-			return error === undefined && blocks.length === 2 && blocks[0].type === 'reasoning' && blocks[1].type === 'text' && finishOf(chunks)?.reason?.kind === 'stop';
+			return error?.code === 'EMPTY_RESPONSE' && blocks.every((block) => block.type !== 'text');
 		},
 	},
 	{

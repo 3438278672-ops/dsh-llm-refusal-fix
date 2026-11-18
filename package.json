@@ -1,7 +1,7 @@
 {
   "name": "dsh-llm-refusal-fix",
-  "version": "0.1.0",
-  "description": "Patch for the DeepSeek Messages adapter: treat legal stop_reason values (refusal / pause_turn / model_context_window_exceeded) as terminal turn states instead of MALFORMED_RESPONSE, and surface a readable refusal notice.",
+  "version": "0.2.0",
+  "description": "Patch for the DeepSeek Messages adapter: map the legal stop_reason values (refusal / pause_turn / cancelled / model_context_window_exceeded) to their real turn states instead of MALFORMED_RESPONSE; a safety refusal becomes the retryable EMPTY_RESPONSE with no synthesized answer text.",
   "type": "module",
   "main": "./index.js",
   "exports": {
